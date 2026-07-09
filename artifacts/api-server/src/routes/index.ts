@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireRole } from "../middleware/auth";
 import healthRouter from "./health";
 import authRouter from "./auth";
 import dashboardRouter from "./dashboard";
@@ -12,6 +12,11 @@ import loansRouter from "./loans";
 import collectionsRouter from "./collections";
 import lotteriesRouter from "./lotteries";
 import reportsRouter from "./reports";
+import giftsRouter from "./gifts";
+import interestsRouter from "./interests";
+import recoveryRouter from "./recovery";
+import officeRouter from "./office";
+import importsRouter from "./imports";
 
 const router: IRouter = Router();
 
@@ -20,15 +25,47 @@ router.use(healthRouter);
 router.use(authRouter);
 // All routes below require a valid session token
 router.use(requireAuth);
+
 router.use(dashboardRouter);
-router.use(branchesRouter);
-router.use(customersRouter);
-router.use(collectorsRouter);
-router.use(committeesRouter);
-router.use(tokensRouter);
-router.use(loansRouter);
+
+// Branches — super_admin and owner only
+router.use(requireRole("super_admin", "owner"), branchesRouter);
+
+// Customers — everyone except customer-role (they only see their own data via profile)
+router.use(requireRole("super_admin", "owner", "branch_manager", "collector", "accountant"), customersRouter);
+
+// Collectors — managers and above
+router.use(requireRole("super_admin", "owner", "branch_manager"), collectorsRouter);
+
+// Committees & tokens — managers and above
+router.use(requireRole("super_admin", "owner", "branch_manager"), committeesRouter);
+router.use(requireRole("super_admin", "owner", "branch_manager"), tokensRouter);
+
+// Loans — finance roles
+router.use(requireRole("super_admin", "owner", "branch_manager", "accountant"), loansRouter);
+
+// Collections — all authenticated roles (collectors record; customers view receipts)
 router.use(collectionsRouter);
-router.use(lotteriesRouter);
-router.use(reportsRouter);
+
+// Lotteries — managers and above
+router.use(requireRole("super_admin", "owner", "branch_manager"), lotteriesRouter);
+
+// Reports — finance roles
+router.use(requireRole("super_admin", "owner", "branch_manager", "accountant"), reportsRouter);
+
+// Gifts — managers and above
+router.use(requireRole("super_admin", "owner", "branch_manager", "accountant"), giftsRouter);
+
+// Interests — finance roles
+router.use(requireRole("super_admin", "owner", "branch_manager", "accountant"), interestsRouter);
+
+// Recovery — managers, accountants, collectors
+router.use(requireRole("super_admin", "owner", "branch_manager", "accountant", "collector"), recoveryRouter);
+
+// Office — managers and above
+router.use(requireRole("super_admin", "owner", "branch_manager", "accountant"), officeRouter);
+
+// Imports — managers and above
+router.use(requireRole("super_admin", "owner", "branch_manager"), importsRouter);
 
 export default router;

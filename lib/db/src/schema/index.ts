@@ -8,3 +8,7 @@ export * from "./loans";
 export * from "./collections";
 export * from "./lotteries";
 export * from "./sessions";
+export * from "./gifts";
+export * from "./interests";
+export * from "./recovery";
+export * from "./office";
