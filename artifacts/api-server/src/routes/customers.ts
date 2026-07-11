@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, customersTable, branchesTable, tokensTable, loansTable, collectionsTable } from "@workspace/db";
+import { committeesTable, committeeMembersTable, giftDistributionsTable, giftInventoryTable, interestAccountsTable, recoveryTasksTable } from "@workspace/db";
 import { eq, and, ilike, or, sql, count } from "drizzle-orm";
 
 const router: IRouter = Router();
@@ -91,16 +92,44 @@ router.get("/customers/:id", async (req, res): Promise<void> => {
     .where(eq(customersTable.id, id));
   if (!row) { res.status(404).json({ error: "Customer not found" }); return; }
 
-  const [tokCount] = await db.select({ c: sql<number>`count(*)::int` }).from(tokensTable).where(eq(tokensTable.customerId, id));
-  const [lnCount] = await db.select({ c: sql<number>`count(*)::int` }).from(loansTable).where(eq(loansTable.customerId, id));
-  const [paid] = await db.select({ sum: sql<string>`coalesce(sum(amount),0)` }).from(collectionsTable).where(eq(collectionsTable.customerId, id));
+  // Parallel lookups for summary counts
+  const [tokCount, lnCount, paid, giftCount, interestAcc, recoveryCount] = await Promise.all([
+    db.select({ c: sql<number>`count(*)::int` }).from(tokensTable).where(eq(tokensTable.customerId, id)),
+    db.select({ c: sql<number>`count(*)::int` }).from(loansTable).where(eq(loansTable.customerId, id)),
+    db.select({ sum: sql<string>`coalesce(sum(amount),0)` }).from(collectionsTable).where(eq(collectionsTable.customerId, id)),
+    db.select({ c: sql<number>`count(*)::int` }).from(giftDistributionsTable).where(eq(giftDistributionsTable.customerId, id)),
+    db.select().from(interestAccountsTable).where(eq(interestAccountsTable.customerId, id)).limit(1),
+    db.select({ c: sql<number>`count(*)::int` }).from(recoveryTasksTable).where(and(eq(recoveryTasksTable.customerId, id), eq(recoveryTasksTable.status, "pending"))),
+  ]);
+
+  // Committee memberships with token numbers
+  const memberships = await db
+    .select({ cm: committeeMembersTable, commName: committeesTable.name, commType: committeesTable.type })
+    .from(committeeMembersTable)
+    .leftJoin(committeesTable, eq(committeeMembersTable.committeeId, committeesTable.id))
+    .where(eq(committeeMembersTable.customerId, id));
+
+  // Group by committee → array of tokens
+  const committeeSummary = Object.values(
+    memberships.reduce((acc, m) => {
+      const key = m.cm.committeeId;
+      if (!acc[key]) acc[key] = { committeeId: key, committeeName: m.commName ?? "", type: m.commType ?? "", tokens: [] };
+      acc[key].tokens.push(m.cm.tokenNumber);
+      return acc;
+    }, {} as Record<number, { committeeId: number; committeeName: string; type: string; tokens: string[] }>)
+  );
 
   res.json({
     ...row.c,
     branchName: row.branchName,
-    totalTokens: tokCount?.c ?? 0,
-    totalLoans: lnCount?.c ?? 0,
-    totalPaid: parseFloat(paid?.sum ?? "0"),
+    totalTokens: tokCount[0]?.c ?? 0,
+    totalLoans: lnCount[0]?.c ?? 0,
+    totalPaid: parseFloat(paid[0]?.sum ?? "0"),
+    totalGifts: giftCount[0]?.c ?? 0,
+    pendingRecovery: recoveryCount[0]?.c ?? 0,
+    hasInterestAccount: interestAcc.length > 0,
+    interestMonthly: interestAcc[0] ? parseFloat(interestAcc[0].monthlyInterest ?? "0") : 0,
+    committeeMemberships: committeeSummary,
     createdAt: row.c.createdAt.toISOString(),
   });
 });
@@ -132,23 +161,55 @@ router.get("/customers/:id/passbook", async (req, res): Promise<void> => {
     .where(eq(customersTable.id, id));
   if (!row) { res.status(404).json({ error: "Customer not found" }); return; }
 
-  const collections = await db.select().from(collectionsTable).where(eq(collectionsTable.customerId, id)).orderBy(collectionsTable.collectedAt);
+  const [collections, loans, gifts, interestAccs, recoveryTasks] = await Promise.all([
+    db.select().from(collectionsTable).where(eq(collectionsTable.customerId, id)).orderBy(collectionsTable.collectedAt),
+    db.select().from(loansTable).where(eq(loansTable.customerId, id)).orderBy(loansTable.createdAt),
+    db.select({ gd: giftDistributionsTable, giftName: giftInventoryTable.name })
+      .from(giftDistributionsTable)
+      .leftJoin(giftInventoryTable, eq(giftDistributionsTable.giftId, giftInventoryTable.id))
+      .where(eq(giftDistributionsTable.customerId, id))
+      .orderBy(giftDistributionsTable.distributionDate),
+    db.select().from(interestAccountsTable).where(eq(interestAccountsTable.customerId, id)),
+    db.select().from(recoveryTasksTable).where(eq(recoveryTasksTable.customerId, id)).orderBy(recoveryTasksTable.createdAt),
+  ]);
 
-  const entries = collections.map((c, i) => ({
-    id: c.id,
-    type: "payment" as const,
-    description: `Payment via ${c.paymentMode}${c.receiptNumber ? ` (${c.receiptNumber})` : ""}`,
-    amount: parseFloat(c.amount),
-    balance: null,
-    date: c.collectedAt.toISOString(),
-  }));
+  const entries = [
+    ...collections.map((c) => ({
+      id: c.id, type: "payment" as const,
+      description: `Payment via ${c.paymentMode}${c.notes ? ` — ${c.notes}` : ""}`,
+      amount: parseFloat(c.amount), date: c.collectedAt.toISOString(),
+    })),
+    ...loans.map((l) => ({
+      id: l.id + 100000, type: "loan" as const,
+      description: `Loan ${l.status} — ₹${parseFloat(l.principalAmount).toLocaleString("en-IN")} @ ${l.interestRate}% (${l.interestType})`,
+      amount: parseFloat(l.principalAmount), date: l.createdAt.toISOString(),
+    })),
+    ...gifts.map((g) => ({
+      id: g.gd.id + 200000, type: "gift" as const,
+      description: `Gift: ${g.giftName ?? "Item"} × ${g.gd.quantity}`,
+      amount: 0, date: g.gd.distributionDate ? new Date(g.gd.distributionDate + "T00:00:00Z").toISOString() : new Date().toISOString(),
+    })),
+    ...recoveryTasks.map((r) => ({
+      id: r.id + 300000, type: "recovery" as const,
+      description: `Recovery: ${r.notes ?? ""} — ${r.status} | Overdue: ₹${r.overdueAmount ?? 0}`,
+      amount: parseFloat(r.overdueAmount ?? "0"), date: r.createdAt.toISOString(),
+    })),
+  ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-  const [paid] = await db.select({ sum: sql<string>`coalesce(sum(amount),0)` }).from(collectionsTable).where(eq(collectionsTable.customerId, id));
-  const totalPaid = parseFloat(paid?.sum ?? "0");
-
+  const totalPaid = collections.reduce((s, c) => s + parseFloat(c.amount), 0);
   const customer = { ...row.c, branchName: row.branchName, totalTokens: 0, totalLoans: 0, totalPaid, createdAt: row.c.createdAt.toISOString() };
 
-  res.json({ customer, entries, totalPaid, totalDue: 0 });
+  res.json({
+    customer, entries, totalPaid, totalDue: 0,
+    loans, gifts: gifts.map(g => ({ ...g.gd, giftName: g.giftName })),
+    interestAccounts: interestAccs.map(a => ({
+      ...a,
+      principalAmount: parseFloat(a.principalAmount),
+      interestRate: parseFloat(a.interestRate),
+      monthlyInterest: parseFloat(a.monthlyInterest ?? "0"),
+    })),
+    recoveryTasks,
+  });
 });
 
 router.get("/customers/:id/timeline", async (req, res): Promise<void> => {
