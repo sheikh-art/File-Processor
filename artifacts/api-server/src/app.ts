@@ -13,7 +13,7 @@ const app: Express = express();
 // Security headers
 // ---------------------------------------------------------------------------
 app.use(
-  helmet({
+  (helmet as any)({
     // Allow inline scripts needed by the frontend in dev; tighten in production
     contentSecurityPolicy: process.env.NODE_ENV === "production",
   }),
@@ -42,7 +42,7 @@ app.use(
 // Request logging & body parsing
 // ---------------------------------------------------------------------------
 app.use(
-  pinoHttp({
+  (pinoHttp as any)({
     logger,
     serializers: {
       req(req: Request) {
