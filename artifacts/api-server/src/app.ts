@@ -67,9 +67,17 @@ app.use("/api", router);
 // Serves the built bissi-app on / and collector-app on /collector
 // ---------------------------------------------------------------------------
 if (process.env.NODE_ENV === "production") {
-  const __serverDir = dirname(fileURLToPath(import.meta.url));
-  const bissiDist = resolve(__serverDir, "./public");
-  const collectorDist = resolve(__serverDir, "./collector");
+  let bissiDist: string;
+  let collectorDist: string;
+
+  if (process.env.VERCEL) {
+    bissiDist = resolve(process.cwd(), "artifacts/api-server/dist/public");
+    collectorDist = resolve(process.cwd(), "artifacts/api-server/dist/collector");
+  } else {
+    const __serverDir = dirname(fileURLToPath(import.meta.url));
+    bissiDist = resolve(__serverDir, "./public");
+    collectorDist = resolve(__serverDir, "./collector");
+  }
 
   // Collector app — must be registered before the root static handler
   app.use("/collector", express.static(collectorDist));
